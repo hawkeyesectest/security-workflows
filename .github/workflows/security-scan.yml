@@ -2,33 +2,70 @@ name: Security Pipeline
 
 on:
   workflow_call:
+    inputs:
+      python-version:
+        description: "Python version for dependency scanning"
+        required: false
+        type: string
+        default: "3.12"
+      severity-threshold:
+        description: "Minimum severity to fail on (CRITICAL, HIGH, MEDIUM, LOW)"
+        required: false
+        type: string
+        default: "critical"
     secrets:
       SEMGREP_APP_TOKEN:
         required: false
 
 permissions:
   contents: read
+  pull-requests: write
+  actions: read
 
 jobs:
+
+  # ── Fetch central security configs once, share via artifacts ──
+  fetch-configs:
+    name: "Setup: Fetch Org Configs"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout security-workflows
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: hawkeyesectest/security-workflows
+          path: _security-configs
+          sparse-checkout: |
+            .gitleaks.toml
+            .semgrep/
+      - name: Upload configs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: security-configs
+          path: |
+            _security-configs/.gitleaks.toml
+            _security-configs/.semgrep/
+          retention-days: 1
+
   gitleaks:
     name: "Secrets: Gitleaks"
     runs-on: ubuntu-latest
+    needs: fetch-configs
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - name: Download org configs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: security-configs
+          path: _security-configs
       - name: Install Gitleaks
         run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz | tar xz
           sudo mv gitleaks /usr/local/bin/
       - name: Run Gitleaks
-        run: |
-          if [ -f ".gitleaks.toml" ]; then
-            gitleaks detect --source . --verbose --config .gitleaks.toml
-          else
-            gitleaks detect --source . --verbose
-          fi
+        run: gitleaks detect --source . --verbose --config _security-configs/.gitleaks.toml
 
   trufflehog:
     name: "Secrets: TruffleHog"
@@ -46,21 +83,25 @@ jobs:
   semgrep:
     name: "SAST: Semgrep"
     runs-on: ubuntu-latest
+    needs: fetch-configs
     container:
       image: semgrep/semgrep
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Download org configs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: security-configs
+          path: _security-configs
       - name: Run Semgrep
         run: |
-          semgrep scan \
-            --config p/python \
-            --config p/security-audit \
-            --config p/owasp-top-ten \
-            --sarif \
-            --output semgrep-results.sarif \
-            --error \
-            .
+          CONFIGS="--config p/python --config p/security-audit --config p/owasp-top-ten"
+          CONFIGS="$CONFIGS --config _security-configs/.semgrep/"
+          if [ -d ".semgrep" ]; then
+            CONFIGS="$CONFIGS --config .semgrep/"
+          fi
+          semgrep scan $CONFIGS --sarif --output semgrep-results.sarif --error .
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
       - name: Upload results
@@ -79,7 +120,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.12"
+          python-version: ${{ inputs.python-version }}
       - name: Install and audit
         run: |
           pip install -r requirements.txt
@@ -123,7 +164,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.12"
+          python-version: ${{ inputs.python-version }}
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Generate SBOM
@@ -136,7 +177,7 @@ jobs:
         uses: anchore/scan-action@2c901ab7378897c01b8efaa2d0c9bf519cc64b9e
         with:
           sbom: sbom.spdx.json
-          severity-cutoff: critical
+          severity-cutoff: ${{ inputs.severity-threshold }}
           fail-build: "true"
           output-format: sarif
       - name: Upload Grype results
@@ -166,33 +207,334 @@ jobs:
       - sbom
     steps:
       - name: Evaluate results
+        id: gate
         run: |
-          echo "## Security Gate Results" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Job | Result |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Gitleaks | ${{ needs.gitleaks.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| TruffleHog | ${{ needs.trufflehog.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Semgrep | ${{ needs.semgrep.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| pip-audit | ${{ needs.pip-audit.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Trivy | ${{ needs.trivy.result }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| SBOM/Grype | ${{ needs.sbom.result }} |" >> "$GITHUB_STEP_SUMMARY"
-
           failed=0
-          for result in \
-            "${{ needs.gitleaks.result }}" \
-            "${{ needs.trufflehog.result }}" \
-            "${{ needs.semgrep.result }}" \
-            "${{ needs.pip-audit.result }}" \
-            "${{ needs.trivy.result }}" \
-            "${{ needs.sbom.result }}"; do
+          summary=""
+          for pair in \
+            "Gitleaks:${{ needs.gitleaks.result }}" \
+            "TruffleHog:${{ needs.trufflehog.result }}" \
+            "Semgrep:${{ needs.semgrep.result }}" \
+            "pip-audit:${{ needs.pip-audit.result }}" \
+            "Trivy:${{ needs.trivy.result }}" \
+            "SBOM/Grype:${{ needs.sbom.result }}"; do
+            name="${pair%%:*}"
+            result="${pair##*:}"
+            icon="✅"
             if [ "$result" = "failure" ]; then
+              icon="❌"
               failed=1
+            elif [ "$result" = "skipped" ]; then
+              icon="⏭️"
             fi
+            summary="$summary| $icon $name | $result |\n"
           done
+
+          {
+            echo "## 🔒 Security Gate Results"
+            echo ""
+            echo "| Check | Result |"
+            echo "|-------|--------|"
+            echo -e "$summary"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
 
           if [ "$failed" -eq 1 ]; then
             echo "::error::Security gate FAILED — one or more checks did not pass."
             exit 1
           fi
           echo "All security checks passed."
+
+  # ── Summary Comment: parse scan artifacts and post a PR comment ──
+  summary-comment:
+    name: "Summary: PR Comment"
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - gitleaks
+      - trufflehog
+      - semgrep
+      - pip-audit
+      - trivy
+      - sbom
+      - security-gate
+    steps:
+      - name: Download all scan artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: scan-results
+        continue-on-error: true
+
+      - name: Build and post summary comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const fs = require('fs');
+
+            // ── Job results ──
+            const jobs = [
+              { name: 'Gitleaks',    cat: 'Secrets',      result: '${{ needs.gitleaks.result }}' },
+              { name: 'TruffleHog',  cat: 'Secrets',      result: '${{ needs.trufflehog.result }}' },
+              { name: 'Semgrep',     cat: 'Code (SAST)',   result: '${{ needs.semgrep.result }}' },
+              { name: 'pip-audit',   cat: 'Dependencies', result: '${{ needs.pip-audit.result }}' },
+              { name: 'Trivy',       cat: 'Dependencies', result: '${{ needs.trivy.result }}' },
+              { name: 'SBOM/Grype',  cat: 'SBOM',         result: '${{ needs.sbom.result }}' },
+            ];
+            const gateResult = '${{ needs.security-gate.result }}';
+            const failCount = jobs.filter(j => j.result === 'failure').length;
+            const passCount = jobs.filter(j => j.result === 'success').length;
+
+            if (failCount === 0) {
+              core.info('All checks passed — posting success comment.');
+            }
+
+            // ── Mitigation knowledge base ──
+            const mitigations = {
+              'disabled-cert-validation': {
+                risk: 'CRITICAL',
+                title: 'TLS certificate verification disabled',
+                why: 'Allows man-in-the-middle attacks. Any network attacker can intercept and modify traffic.',
+                fix: 'Remove `verify=False`. If you need a custom CA, set `REQUESTS_CA_BUNDLE` env var or pass `verify="/path/to/ca-bundle.crt"`.',
+              },
+              'insecure-hash-algorithm-md5': {
+                risk: 'HIGH',
+                title: 'MD5 used for hashing',
+                why: 'MD5 has known collision attacks. It should never be used for security purposes.',
+                fix: 'Use `hashlib.sha256()` for integrity checks or `bcrypt`/`argon2` for password hashing.',
+              },
+              'md5-used-as-password': {
+                risk: 'CRITICAL',
+                title: 'MD5 used for password hashing',
+                why: 'MD5 passwords can be cracked in seconds using rainbow tables. No salt, no key stretching.',
+                fix: 'Use `passlib.hash.bcrypt.hash(password)` or `argon2.PasswordHasher().hash(password)`.',
+              },
+              'sql-injection': {
+                risk: 'CRITICAL',
+                title: 'SQL injection via string formatting',
+                why: 'User input becomes part of the SQL query structure, allowing data theft or deletion.',
+                fix: 'Use parameterized queries: `cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))`',
+              },
+              'jwt-decode-missing-audience': {
+                risk: 'HIGH',
+                title: 'JWT decoded without audience validation',
+                why: 'Tokens intended for another service will be accepted, breaking tenant isolation.',
+                fix: 'Add `audience="your-api"` parameter to `jwt.decode()`.',
+              },
+              'sensitive-data-in-logs': {
+                risk: 'HIGH',
+                title: 'Sensitive data written to logs',
+                why: 'Credentials in logs are visible to anyone with log access and persist in aggregation systems.',
+                fix: 'Remove the sensitive variable from the log statement. Log an event identifier instead of the credential.',
+              },
+              'secrets-inherit': {
+                risk: 'MEDIUM',
+                title: '`secrets: inherit` passes all secrets to reusable workflow',
+                why: 'The called workflow receives every secret from the caller, not just the ones it needs.',
+                fix: 'This is expected for centralized security pipelines. Suppress if intentional.',
+              },
+              'dependabot-missing-cooldown': {
+                risk: 'LOW',
+                title: 'Dependabot missing cooldown period',
+                why: 'Without a cooldown, Dependabot may pick up newly published malicious packages.',
+                fix: 'Add `cooldown: { period: 3, period-unit: "days" }` to each Dependabot ecosystem config.',
+              },
+            };
+
+            // Map SARIF rule IDs to mitigation keys
+            function getMitigation(ruleId) {
+              const short = ruleId?.split('.').pop() || '';
+              for (const [key, val] of Object.entries(mitigations)) {
+                if (short.includes(key) || ruleId?.includes(key)) return { key, ...val };
+              }
+              return null;
+            }
+
+            const riskOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
+            const riskIcon  = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🔵', INFO: 'ℹ️' };
+
+            // ── Parse scan results ──
+            const findings = [];
+
+            // Semgrep SARIF
+            try {
+              const sarif = JSON.parse(fs.readFileSync('scan-results/semgrep-results/semgrep-results.sarif', 'utf8'));
+              for (const r of (sarif.runs?.[0]?.results || [])) {
+                const file = r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || 'unknown';
+                const line = r.locations?.[0]?.physicalLocation?.region?.startLine || '?';
+                const ruleId = r.ruleId || '';
+                const msg = (r.message?.text || '').split('\n')[0].substring(0, 200);
+                const mit = getMitigation(ruleId);
+                findings.push({
+                  source: 'Semgrep',
+                  risk: mit?.risk || (r.level === 'error' ? 'HIGH' : 'MEDIUM'),
+                  ruleId: ruleId.split('.').pop(),
+                  location: `${file}:${line}`,
+                  message: msg,
+                  title: mit?.title || ruleId.split('.').pop(),
+                  why: mit?.why || '',
+                  fix: mit?.fix || 'Review the flagged code and apply the suggested fix from the Semgrep rule documentation.',
+                });
+              }
+            } catch {}
+
+            // pip-audit JSON
+            try {
+              const data = JSON.parse(fs.readFileSync('scan-results/pip-audit-results/pip-audit-results.json', 'utf8'));
+              for (const dep of (data.dependencies || [])) {
+                for (const v of (dep.vulns || [])) {
+                  findings.push({
+                    source: 'pip-audit',
+                    risk: 'HIGH',
+                    ruleId: v.id,
+                    location: `requirements.txt (${dep.name}==${dep.version})`,
+                    message: (v.description || 'Known vulnerability').substring(0, 200),
+                    title: `${dep.name} ${dep.version} — ${v.id}`,
+                    why: `This version of ${dep.name} has a known vulnerability tracked as ${v.id}.`,
+                    fix: v.fix_versions?.length
+                      ? `Upgrade: \`pip install ${dep.name}>=${v.fix_versions[0]}\` and update requirements.txt.`
+                      : `No fix available yet. Consider pinning to a different package or adding to your risk acceptance log.`,
+                  });
+                }
+              }
+            } catch {}
+
+            // Trivy SARIF
+            try {
+              const sarif = JSON.parse(fs.readFileSync('scan-results/trivy-results/trivy-results.sarif', 'utf8'));
+              for (const r of (sarif.runs?.[0]?.results || [])) {
+                const ruleId = r.ruleId || 'unknown';
+                const msg = (r.message?.text || '').split('\n')[0].substring(0, 200);
+                findings.push({
+                  source: 'Trivy',
+                  risk: r.level === 'error' ? 'CRITICAL' : 'HIGH',
+                  ruleId,
+                  location: r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || 'requirements.txt',
+                  message: msg,
+                  title: ruleId,
+                  why: msg,
+                  fix: 'Upgrade the affected package to the patched version listed in the CVE advisory.',
+                });
+              }
+            } catch {}
+
+            // Sort by risk priority
+            findings.sort((a, b) => (riskOrder[a.risk] ?? 99) - (riskOrder[b.risk] ?? 99));
+
+            // ── Build comment ──
+            const lines = [];
+
+            // Header with overall verdict
+            if (failCount === 0) {
+              lines.push(`## ✅ Security Pipeline — All Checks Passed`);
+              lines.push(``);
+              lines.push(`All ${passCount} security checks passed. No action required.`);
+            } else {
+              lines.push(`## 🚨 Security Pipeline — ${failCount} Check${failCount > 1 ? 's' : ''} Failed`);
+              lines.push(``);
+              lines.push(`> **This PR cannot be merged until the findings below are resolved or explicitly suppressed.**`);
+            }
+            lines.push(``);
+
+            // Status table
+            lines.push(`| Check | Category | Result |`);
+            lines.push(`|-------|----------|--------|`);
+            for (const j of jobs) {
+              const icon = j.result === 'success' ? '✅' : j.result === 'failure' ? '❌' : '⏭️';
+              lines.push(`| ${icon} ${j.name} | ${j.cat} | \`${j.result}\` |`);
+            }
+            lines.push(``);
+
+            if (findings.length === 0 && failCount > 0) {
+              lines.push(`> ⚠️ Scanners reported failures but no parseable artifacts were found. Check the job logs directly.`);
+            }
+
+            if (findings.length > 0) {
+              // Group by risk level
+              const grouped = {};
+              for (const f of findings) {
+                if (!grouped[f.risk]) grouped[f.risk] = [];
+                grouped[f.risk].push(f);
+              }
+
+              lines.push(`---`);
+              lines.push(``);
+              lines.push(`### Findings by Risk Level`);
+              lines.push(``);
+
+              let findingNum = 0;
+              for (const risk of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']) {
+                const items = grouped[risk];
+                if (!items?.length) continue;
+
+                const icon = riskIcon[risk] || '⚪';
+                lines.push(`<details ${risk === 'CRITICAL' || risk === 'HIGH' ? 'open' : ''}>`);
+                lines.push(`<summary>${icon} <strong>${risk}</strong> — ${items.length} finding${items.length > 1 ? 's' : ''}</summary>`);
+                lines.push(``);
+
+                for (const f of items) {
+                  findingNum++;
+                  lines.push(`#### ${findingNum}. ${f.title}`);
+                  lines.push(``);
+                  lines.push(`| | |`);
+                  lines.push(`|---|---|`);
+                  lines.push(`| **Scanner** | ${f.source} |`);
+                  lines.push(`| **Location** | \`${f.location}\` |`);
+                  lines.push(`| **Rule** | \`${f.ruleId}\` |`);
+                  lines.push(``);
+                  if (f.why) {
+                    lines.push(`**Why this matters:** ${f.why}`);
+                    lines.push(``);
+                  }
+                  lines.push(`**How to fix:**`);
+                  lines.push(`> ${f.fix}`);
+                  lines.push(``);
+                }
+
+                lines.push(`</details>`);
+                lines.push(``);
+              }
+            }
+
+            // Footer
+            lines.push(`---`);
+            lines.push(``);
+            lines.push(`<details>`);
+            lines.push(`<summary>ℹ️ About this comment</summary>`);
+            lines.push(``);
+            lines.push(`This comment is auto-generated by the [centralized security pipeline](https://github.com/hawkeyesectest/security-workflows). It updates on each push to this PR.`);
+            lines.push(``);
+            lines.push(`**False positive?** Add a suppression comment with justification — see the [suppression guide](https://github.com/hawkeyesectest/security-workflows#suppressing-false-positives).`);
+            lines.push(``);
+            lines.push(`</details>`);
+
+            const body = lines.join('\n');
+
+            // ── Post or update the comment ──
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user?.login === 'github-actions[bot]' &&
+              c.body?.includes('Security Pipeline')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated existing comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+              core.info('Created new comment');
+            }
