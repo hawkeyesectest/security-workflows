@@ -18,10 +18,17 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - name: Install Gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz | tar xz
+          sudo mv gitleaks /usr/local/bin/
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@f586c14365d4643c6aa59d472ae6e984bf47bb34
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f ".gitleaks.toml" ]; then
+            gitleaks detect --source . --verbose --config .gitleaks.toml
+          else
+            gitleaks detect --source . --verbose
+          fi
 
   trufflehog:
     name: "Secrets: TruffleHog"
