@@ -28,7 +28,7 @@ updates:
       - "dependencies"
       - "security"
     reviewers:
-      - "your-org/security-team"
+      - "hawkeyesectest/security-team"
     groups:
       # Bundle all non-major Python updates into one PR
       python-minor-patch:
@@ -54,7 +54,7 @@ updates:
       - "security"
       - "ci"
     reviewers:
-      - "your-org/security-team"
+      - "hawkeyesectest/security-team"
     groups:
       # Bundle all Actions patch updates together
       actions-minor-patch:

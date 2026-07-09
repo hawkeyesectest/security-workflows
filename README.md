@@ -6,19 +6,19 @@ A reusable GitHub Actions security pipeline that provides secrets scanning, SAST
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  your-org/.github  (org-level defaults)                         │
+│  hawkeyesectest/.github  (org-level defaults)                         │
 │  └── workflow-templates/security-scan.yml  (starter template)   │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ provides template
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  any-repo/.github/workflows/ci.yml  (3-line callsite)           │
-│  └── uses: your-org/security-workflows/...@main                 │
+│  └── uses: hawkeyesectest/security-workflows/...@main                 │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ calls
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  your-org/security-workflows  (this repo)                       │
+│  hawkeyesectest/security-workflows  (this repo)                       │
 │  ├── .github/workflows/security-scan.yml  ← reusable workflow   │
 │  ├── .semgrep/rules.yml                   ← org-wide rules      │
 │  ├── .gitleaks.toml                       ← secrets config       │
@@ -56,7 +56,7 @@ on:
 
 jobs:
   security:
-    uses: your-org/security-workflows/.github/workflows/security-scan.yml@main
+    uses: hawkeyesectest/security-workflows/.github/workflows/security-scan.yml@main
     secrets: inherit
 ```
 
@@ -67,7 +67,7 @@ That's it. Three lines in the `jobs:` block.
 ```yaml
 jobs:
   security:
-    uses: your-org/security-workflows/.github/workflows/security-scan.yml@main
+    uses: hawkeyesectest/security-workflows/.github/workflows/security-scan.yml@main
     with:
       python-version: "3.11"
       requirements-file: "requirements/prod.txt"

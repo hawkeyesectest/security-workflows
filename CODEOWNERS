@@ -11,78 +11,78 @@
 #   - Teams must be given write access to the repo
 #   - Enable "Require review from Code Owners" in branch protection
 #
-# Replace @your-org/security-team and @your-org/platform-team
+# Replace @hawkeyesectest/security-team and @hawkeyesectest/platform-team
 # with your actual GitHub team slugs.
 
 # ── DEFAULT ───────────────────────────────────
 # Fallback: platform team reviews everything not
 # covered by a more specific rule below
-*                                   @your-org/platform-team
+*                                   @hawkeyesectest/platform-team
 
 # ── AUTHENTICATION & AUTHORIZATION ────────────
 # Auth logic is the #1 target for attackers.
 # Mistakes here bypass everything else.
-**/auth/                            @your-org/security-team
-**/authentication/                  @your-org/security-team
-**/authorization/                   @your-org/security-team
-**/middleware/auth*                  @your-org/security-team
-**/oauth/                           @your-org/security-team
-**/sso/                             @your-org/security-team
-**/jwt*                             @your-org/security-team
-**/permissions/                     @your-org/security-team
-**/rbac/                            @your-org/security-team
+**/auth/                            @hawkeyesectest/security-team
+**/authentication/                  @hawkeyesectest/security-team
+**/authorization/                   @hawkeyesectest/security-team
+**/middleware/auth*                  @hawkeyesectest/security-team
+**/oauth/                           @hawkeyesectest/security-team
+**/sso/                             @hawkeyesectest/security-team
+**/jwt*                             @hawkeyesectest/security-team
+**/permissions/                     @hawkeyesectest/security-team
+**/rbac/                            @hawkeyesectest/security-team
 
 # ── CRYPTOGRAPHY ──────────────────────────────
 # Rolling your own crypto is a common source of
 # vulnerabilities. Expert review is essential.
-**/crypto/                          @your-org/security-team
-**/encryption/                      @your-org/security-team
-**/signing/                         @your-org/security-team
-**/certificates/                    @your-org/security-team
-**/tls/                             @your-org/security-team
-**/keys/                            @your-org/security-team
+**/crypto/                          @hawkeyesectest/security-team
+**/encryption/                      @hawkeyesectest/security-team
+**/signing/                         @hawkeyesectest/security-team
+**/certificates/                    @hawkeyesectest/security-team
+**/tls/                             @hawkeyesectest/security-team
+**/keys/                            @hawkeyesectest/security-team
 
 # ── ENVIRONMENT & CONFIGURATION ───────────────
 # Config files often contain secrets references,
 # service URLs, and feature flags that affect security.
-.env*                               @your-org/security-team @your-org/platform-team
-**/config/                          @your-org/security-team @your-org/platform-team
-**/settings/                        @your-org/security-team @your-org/platform-team
-*.toml                              @your-org/platform-team
-*.yaml                              @your-org/platform-team
-*.yml                               @your-org/platform-team
+.env*                               @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/config/                          @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/settings/                        @hawkeyesectest/security-team @hawkeyesectest/platform-team
+*.toml                              @hawkeyesectest/platform-team
+*.yaml                              @hawkeyesectest/platform-team
+*.yml                               @hawkeyesectest/platform-team
 
 # ── CI/CD WORKFLOWS ──────────────────────────
 # Workflows have access to secrets and can deploy
 # code. A compromised workflow = compromised production.
-.github/                            @your-org/security-team @your-org/platform-team
-.github/workflows/                  @your-org/security-team
+.github/                            @hawkeyesectest/security-team @hawkeyesectest/platform-team
+.github/workflows/                  @hawkeyesectest/security-team
 
 # ── INFRASTRUCTURE AS CODE ────────────────────
 # IaC defines network rules, IAM policies, and
 # compute configuration. Misconfig = open S3 buckets.
-**/terraform/                       @your-org/security-team @your-org/platform-team
-**/cloudformation/                  @your-org/security-team @your-org/platform-team
-**/pulumi/                          @your-org/security-team @your-org/platform-team
-**/k8s/                             @your-org/security-team @your-org/platform-team
-**/kubernetes/                      @your-org/security-team @your-org/platform-team
-**/helm/                            @your-org/security-team @your-org/platform-team
-**/docker-compose*.yml              @your-org/security-team @your-org/platform-team
-Dockerfile*                         @your-org/security-team @your-org/platform-team
+**/terraform/                       @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/cloudformation/                  @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/pulumi/                          @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/k8s/                             @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/kubernetes/                      @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/helm/                            @hawkeyesectest/security-team @hawkeyesectest/platform-team
+**/docker-compose*.yml              @hawkeyesectest/security-team @hawkeyesectest/platform-team
+Dockerfile*                         @hawkeyesectest/security-team @hawkeyesectest/platform-team
 
 # ── SECURITY TOOLING CONFIG ──────────────────
 # Changes to security scanner configs could
 # silence alerts. Require security team review.
-.semgrep/                           @your-org/security-team
-.gitleaks.toml                      @your-org/security-team
-.trivyignore                        @your-org/security-team
-CODEOWNERS                          @your-org/security-team
+.semgrep/                           @hawkeyesectest/security-team
+.gitleaks.toml                      @hawkeyesectest/security-team
+.trivyignore                        @hawkeyesectest/security-team
+CODEOWNERS                          @hawkeyesectest/security-team
 
 # ── DEPENDENCY MANAGEMENT ────────────────────
 # New dependencies expand attack surface.
 # Security review catches typosquatting and
 # unnecessary transitive dependency chains.
-requirements*.txt                   @your-org/security-team @your-org/platform-team
-Pipfile*                            @your-org/security-team @your-org/platform-team
-pyproject.toml                      @your-org/security-team @your-org/platform-team
-poetry.lock                         @your-org/security-team @your-org/platform-team
+requirements*.txt                   @hawkeyesectest/security-team @hawkeyesectest/platform-team
+Pipfile*                            @hawkeyesectest/security-team @hawkeyesectest/platform-team
+pyproject.toml                      @hawkeyesectest/security-team @hawkeyesectest/platform-team
+poetry.lock                         @hawkeyesectest/security-team @hawkeyesectest/platform-team
