@@ -24,48 +24,26 @@ permissions:
 
 jobs:
 
-  # ── Fetch central security configs once, share via artifacts ──
-  fetch-configs:
-    name: "Setup: Fetch Org Configs"
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout security-workflows
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          repository: hawkeyesectest/security-workflows
-          path: _security-configs
-          sparse-checkout: |
-            .gitleaks.toml
-            .semgrep/
-      - name: Upload configs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: security-configs
-          path: |
-            _security-configs/.gitleaks.toml
-            _security-configs/.semgrep/
-          retention-days: 1
-
   gitleaks:
     name: "Secrets: Gitleaks"
     runs-on: ubuntu-latest
-    needs: fetch-configs
     steps:
       - name: Checkout repo
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Download org configs
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - name: Checkout org configs
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          name: security-configs
-          path: _security-configs
+          repository: hawkeyesectest/security-workflows
+          path: _org-configs
+          sparse-checkout: .gitleaks.toml
       - name: Install Gitleaks
         run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.22.1/gitleaks_8.22.1_linux_x64.tar.gz | tar xz
           sudo mv gitleaks /usr/local/bin/
       - name: Run Gitleaks
-        run: gitleaks detect --source . --verbose --config _security-configs/.gitleaks.toml
+        run: gitleaks detect --source . --verbose --config _org-configs/.gitleaks.toml
 
   trufflehog:
     name: "Secrets: TruffleHog"
@@ -83,21 +61,25 @@ jobs:
   semgrep:
     name: "SAST: Semgrep"
     runs-on: ubuntu-latest
-    needs: fetch-configs
     container:
       image: semgrep/semgrep
     steps:
       - name: Checkout repo
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Download org configs
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - name: Checkout org configs
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          name: security-configs
-          path: _security-configs
+          repository: hawkeyesectest/security-workflows
+          path: _org-configs
+          sparse-checkout: .semgrep/
       - name: Run Semgrep
+        id: semgrep-scan
+        continue-on-error: true
         run: |
           CONFIGS="--config p/python --config p/security-audit --config p/owasp-top-ten"
-          CONFIGS="$CONFIGS --config _security-configs/.semgrep/"
+          if [ -d "_org-configs/.semgrep" ]; then
+            CONFIGS="$CONFIGS --config _org-configs/.semgrep/"
+          fi
           if [ -d ".semgrep" ]; then
             CONFIGS="$CONFIGS --config .semgrep/"
           fi
@@ -105,11 +87,14 @@ jobs:
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
       - name: Upload results
-        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: semgrep-results
           path: semgrep-results.sarif
+          if-no-files-found: ignore
+      - name: Fail on findings
+        if: steps.semgrep-scan.outcome == 'failure'
+        run: exit 1
 
   pip-audit:
     name: "Deps: pip-audit"
@@ -122,16 +107,21 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
       - name: Install and audit
+        id: pip-audit-scan
+        continue-on-error: true
         run: |
           pip install -r requirements.txt
           pip install pip-audit
           pip-audit --requirement requirements.txt --format json --output pip-audit-results.json --desc
       - name: Upload results
-        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pip-audit-results
           path: pip-audit-results.json
+          if-no-files-found: ignore
+      - name: Fail on findings
+        if: steps.pip-audit-scan.outcome == 'failure'
+        run: exit 1
 
   trivy:
     name: "Deps: Trivy"
@@ -140,6 +130,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Run Trivy
+        id: trivy
+        continue-on-error: true
         uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37
         with:
           scan-type: fs
@@ -149,11 +141,14 @@ jobs:
           output: trivy-results.sarif
           exit-code: "1"
       - name: Upload results
-        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: trivy-results
           path: trivy-results.sarif
+          if-no-files-found: ignore
+      - name: Fail on findings
+        if: steps.trivy.outcome == 'failure'
+        run: exit 1
 
   sbom:
     name: "SBOM: Generate & Scan"
@@ -261,91 +256,104 @@ jobs:
       - security-gate
     steps:
       - name: Download all scan artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           path: scan-results
         continue-on-error: true
 
+      - name: Debug artifact structure
+        if: always()
+        run: find scan-results -type f 2>/dev/null || echo "No scan-results directory"
+
       - name: Build and post summary comment
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             const fs = require('fs');
+            const path = require('path');
+
+            function readJSON(filePath) {
+              try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+              catch { return null; }
+            }
+
+            function findFile(dir, name) {
+              try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true, recursive: true });
+                for (const e of entries) {
+                  if (e.name === name) {
+                    const parent = e.parentPath || e.path || dir;
+                    return path.join(parent, e.name);
+                  }
+                }
+              } catch {}
+              return null;
+            }
+
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
             // ── Job results ──
             const jobs = [
-              { name: 'Gitleaks',    cat: 'Secrets',      result: '${{ needs.gitleaks.result }}' },
-              { name: 'TruffleHog',  cat: 'Secrets',      result: '${{ needs.trufflehog.result }}' },
-              { name: 'Semgrep',     cat: 'Code (SAST)',   result: '${{ needs.semgrep.result }}' },
-              { name: 'pip-audit',   cat: 'Dependencies', result: '${{ needs.pip-audit.result }}' },
-              { name: 'Trivy',       cat: 'Dependencies', result: '${{ needs.trivy.result }}' },
-              { name: 'SBOM/Grype',  cat: 'SBOM',         result: '${{ needs.sbom.result }}' },
+              { name: 'Gitleaks',   cat: 'Secrets',      result: '${{ needs.gitleaks.result }}' },
+              { name: 'TruffleHog', cat: 'Secrets',      result: '${{ needs.trufflehog.result }}' },
+              { name: 'Semgrep',    cat: 'Code (SAST)',   result: '${{ needs.semgrep.result }}' },
+              { name: 'pip-audit',  cat: 'Dependencies', result: '${{ needs.pip-audit.result }}' },
+              { name: 'Trivy',      cat: 'Dependencies', result: '${{ needs.trivy.result }}' },
+              { name: 'SBOM/Grype', cat: 'SBOM',         result: '${{ needs.sbom.result }}' },
             ];
-            const gateResult = '${{ needs.security-gate.result }}';
             const failCount = jobs.filter(j => j.result === 'failure').length;
             const passCount = jobs.filter(j => j.result === 'success').length;
+            const skipCount = jobs.filter(j => j.result === 'skipped').length;
 
-            if (failCount === 0) {
-              core.info('All checks passed — posting success comment.');
-            }
-
-            // ── Mitigation knowledge base ──
-            const mitigations = {
+            // ── Mitigation knowledge base (keyed by partial rule ID match) ──
+            const KB = {
               'disabled-cert-validation': {
-                risk: 'CRITICAL',
-                title: 'TLS certificate verification disabled',
-                why: 'Allows man-in-the-middle attacks. Any network attacker can intercept and modify traffic.',
-                fix: 'Remove `verify=False`. If you need a custom CA, set `REQUESTS_CA_BUNDLE` env var or pass `verify="/path/to/ca-bundle.crt"`.',
-              },
-              'insecure-hash-algorithm-md5': {
-                risk: 'HIGH',
-                title: 'MD5 used for hashing',
-                why: 'MD5 has known collision attacks. It should never be used for security purposes.',
-                fix: 'Use `hashlib.sha256()` for integrity checks or `bcrypt`/`argon2` for password hashing.',
+                risk: 'CRITICAL', title: 'TLS certificate verification disabled',
+                why: 'Enables man-in-the-middle attacks — any network attacker can intercept and modify all traffic from this call.',
+                fix: 'Remove `verify=False`. For custom CAs: `requests.get(url, verify="/path/to/ca-bundle.crt")` or set `REQUESTS_CA_BUNDLE` env var.',
               },
               'md5-used-as-password': {
-                risk: 'CRITICAL',
-                title: 'MD5 used for password hashing',
-                why: 'MD5 passwords can be cracked in seconds using rainbow tables. No salt, no key stretching.',
-                fix: 'Use `passlib.hash.bcrypt.hash(password)` or `argon2.PasswordHasher().hash(password)`.',
+                risk: 'CRITICAL', title: 'MD5 used for password hashing',
+                why: 'MD5 passwords are crackable in seconds via rainbow tables. No salt, no key stretching — this is equivalent to storing plaintext.',
+                fix: '```python\n# Replace hashlib.md5\nfrom passlib.hash import bcrypt\nhashed = bcrypt.hash(password)\n# or\nfrom argon2 import PasswordHasher\nhashed = PasswordHasher().hash(password)\n```',
+              },
+              'insecure-hash-algorithm': {
+                risk: 'HIGH', title: 'Weak hash algorithm (MD5/SHA1)',
+                why: 'MD5 and SHA1 have known collision attacks. They must not be used for security-sensitive operations.',
+                fix: 'Use `hashlib.sha256()` for integrity checks. For passwords, use `bcrypt` or `argon2`.',
               },
               'sql-injection': {
-                risk: 'CRITICAL',
-                title: 'SQL injection via string formatting',
-                why: 'User input becomes part of the SQL query structure, allowing data theft or deletion.',
-                fix: 'Use parameterized queries: `cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))`',
+                risk: 'CRITICAL', title: 'SQL injection via string formatting',
+                why: 'User input is concatenated directly into SQL — an attacker can read, modify, or delete your entire database.',
+                fix: '```python\n# BEFORE (vulnerable)\ncursor.execute(f"SELECT * FROM users WHERE id = \'{user_id}\'")\n\n# AFTER (safe)\ncursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))\n```',
               },
-              'jwt-decode-missing-audience': {
-                risk: 'HIGH',
-                title: 'JWT decoded without audience validation',
-                why: 'Tokens intended for another service will be accepted, breaking tenant isolation.',
-                fix: 'Add `audience="your-api"` parameter to `jwt.decode()`.',
+              'jwt-decode-missing': {
+                risk: 'HIGH', title: 'JWT decoded without full validation',
+                why: 'Without `audience` and `issuer` checks, tokens minted for other services are accepted — breaks tenant isolation.',
+                fix: '```python\njwt.decode(\n    token, key, algorithms=["RS256"],\n    audience="your-api-id",\n    issuer="https://your-auth-provider"\n)\n```',
               },
-              'sensitive-data-in-logs': {
-                risk: 'HIGH',
-                title: 'Sensitive data written to logs',
-                why: 'Credentials in logs are visible to anyone with log access and persist in aggregation systems.',
-                fix: 'Remove the sensitive variable from the log statement. Log an event identifier instead of the credential.',
+              'sensitive-data-in-log': {
+                risk: 'HIGH', title: 'Credentials written to application logs',
+                why: 'Secrets in logs are visible to anyone with log access and persist in log aggregation systems indefinitely.',
+                fix: 'Log an event name or request ID instead of the credential value: `logging.info("auth_attempt user=%s", user_id)`',
               },
-              'secrets-inherit': {
-                risk: 'MEDIUM',
-                title: '`secrets: inherit` passes all secrets to reusable workflow',
-                why: 'The called workflow receives every secret from the caller, not just the ones it needs.',
-                fix: 'This is expected for centralized security pipelines. Suppress if intentional.',
+              'hardcoded': {
+                risk: 'HIGH', title: 'Hardcoded secret or credential',
+                why: 'Secrets in source code are visible to anyone with repo access and are captured permanently in git history.',
+                fix: 'Move the value to an environment variable or secrets manager. Rotate the exposed credential immediately.',
               },
-              'dependabot-missing-cooldown': {
-                risk: 'LOW',
-                title: 'Dependabot missing cooldown period',
-                why: 'Without a cooldown, Dependabot may pick up newly published malicious packages.',
-                fix: 'Add `cooldown: { period: 3, period-unit: "days" }` to each Dependabot ecosystem config.',
+              'path-traversal': {
+                risk: 'HIGH', title: 'Path traversal vulnerability',
+                why: 'User-controlled file paths can escape the intended directory, reading or writing arbitrary files on the server.',
+                fix: 'Use `os.path.realpath()` and verify the resolved path starts with your allowed base directory.',
               },
             };
 
-            // Map SARIF rule IDs to mitigation keys
-            function getMitigation(ruleId) {
-              const short = ruleId?.split('.').pop() || '';
-              for (const [key, val] of Object.entries(mitigations)) {
-                if (short.includes(key) || ruleId?.includes(key)) return { key, ...val };
+            function matchKB(ruleId) {
+              if (!ruleId) return null;
+              const lower = ruleId.toLowerCase();
+              for (const [key, val] of Object.entries(KB)) {
+                if (lower.includes(key)) return val;
               }
               return null;
             }
@@ -357,184 +365,301 @@ jobs:
             const findings = [];
 
             // Semgrep SARIF
-            try {
-              const sarif = JSON.parse(fs.readFileSync('scan-results/semgrep-results/semgrep-results.sarif', 'utf8'));
-              for (const r of (sarif.runs?.[0]?.results || [])) {
-                const file = r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || 'unknown';
-                const line = r.locations?.[0]?.physicalLocation?.region?.startLine || '?';
-                const ruleId = r.ruleId || '';
-                const msg = (r.message?.text || '').split('\n')[0].substring(0, 200);
-                const mit = getMitigation(ruleId);
-                findings.push({
-                  source: 'Semgrep',
-                  risk: mit?.risk || (r.level === 'error' ? 'HIGH' : 'MEDIUM'),
-                  ruleId: ruleId.split('.').pop(),
-                  location: `${file}:${line}`,
-                  message: msg,
-                  title: mit?.title || ruleId.split('.').pop(),
-                  why: mit?.why || '',
-                  fix: mit?.fix || 'Review the flagged code and apply the suggested fix from the Semgrep rule documentation.',
-                });
-              }
-            } catch {}
+            const semgrepFile = findFile('scan-results', 'semgrep-results.sarif');
+            if (semgrepFile) {
+              const sarif = readJSON(semgrepFile);
+              for (const run of (sarif?.runs || [])) {
+                const ruleMap = {};
+                for (const rd of (run.tool?.driver?.rules || [])) {
+                  ruleMap[rd.id] = rd;
+                }
+                for (const r of (run.results || [])) {
+                  const loc = r.locations?.[0]?.physicalLocation;
+                  const file = loc?.artifactLocation?.uri || 'unknown';
+                  const line = loc?.region?.startLine || '?';
+                  const ruleId = r.ruleId || '';
+                  const ruleDef = ruleMap[ruleId];
+                  const msg = (r.message?.text || '').split('\n')[0].substring(0, 300);
+                  const kb = matchKB(ruleId);
 
-            // pip-audit JSON
-            try {
-              const data = JSON.parse(fs.readFileSync('scan-results/pip-audit-results/pip-audit-results.json', 'utf8'));
-              for (const dep of (data.dependencies || [])) {
-                for (const v of (dep.vulns || [])) {
+                  const sarifLevel = r.level || ruleDef?.defaultConfiguration?.level || 'warning';
+                  let risk = kb?.risk || ({ error: 'HIGH', warning: 'MEDIUM', note: 'LOW' }[sarifLevel] || 'MEDIUM');
+
                   findings.push({
-                    source: 'pip-audit',
-                    risk: 'HIGH',
-                    ruleId: v.id,
-                    location: `requirements.txt (${dep.name}==${dep.version})`,
-                    message: (v.description || 'Known vulnerability').substring(0, 200),
-                    title: `${dep.name} ${dep.version} — ${v.id}`,
-                    why: `This version of ${dep.name} has a known vulnerability tracked as ${v.id}.`,
-                    fix: v.fix_versions?.length
-                      ? `Upgrade: \`pip install ${dep.name}>=${v.fix_versions[0]}\` and update requirements.txt.`
-                      : `No fix available yet. Consider pinning to a different package or adding to your risk acceptance log.`,
+                    source: 'Semgrep', risk, location: `\`${file}:${line}\``,
+                    ruleId: ruleId.split('.').pop(),
+                    ruleUrl: ruleDef?.helpUri || `https://semgrep.dev/r/${ruleId}`,
+                    title: kb?.title || ruleDef?.shortDescription?.text || ruleId.split('.').pop(),
+                    description: msg,
+                    why: kb?.why || ruleDef?.fullDescription?.text?.substring(0, 300) || msg,
+                    fix: kb?.fix || ruleDef?.help?.text?.substring(0, 300) || 'See the [Semgrep rule docs](' + (ruleDef?.helpUri || `https://semgrep.dev/r/${ruleId}`) + ') for the recommended fix.',
                   });
                 }
               }
-            } catch {}
+              core.info(`Parsed ${findings.length} Semgrep findings from ${semgrepFile}`);
+            } else {
+              core.info('No Semgrep SARIF found');
+            }
+
+            // pip-audit JSON
+            const pipFile = findFile('scan-results', 'pip-audit-results.json');
+            if (pipFile) {
+              const data = readJSON(pipFile);
+              let pipCount = 0;
+              for (const dep of (data?.dependencies || [])) {
+                for (const v of (dep.vulns || [])) {
+                  pipCount++;
+                  const cveId = v.aliases?.find(a => a.startsWith('CVE-')) || '';
+                  const ghsaId = v.aliases?.find(a => a.startsWith('GHSA-')) || '';
+                  const desc = v.description || 'Known vulnerability in this package version.';
+                  const hasFix = v.fix_versions?.length > 0;
+                  const latestFix = hasFix ? v.fix_versions[v.fix_versions.length - 1] : null;
+
+                  const links = [];
+                  if (cveId) links.push(`[${cveId}](https://nvd.nist.gov/vuln/detail/${cveId})`);
+                  if (ghsaId) links.push(`[${ghsaId}](https://github.com/advisories/${ghsaId})`);
+                  if (v.id?.startsWith('PYSEC-')) links.push(`[${v.id}](https://osv.dev/vulnerability/${v.id})`);
+
+                  findings.push({
+                    source: 'pip-audit',
+                    risk: desc.toLowerCase().includes('remote code') || desc.toLowerCase().includes('critical') ? 'CRITICAL' : 'HIGH',
+                    location: `\`requirements.txt\` — \`${dep.name}==${dep.version}\``,
+                    ruleId: v.id,
+                    ruleUrl: cveId ? `https://nvd.nist.gov/vuln/detail/${cveId}` : `https://osv.dev/vulnerability/${v.id}`,
+                    title: `${dep.name} ${dep.version} — ${cveId || v.id}`,
+                    description: desc.substring(0, 300),
+                    why: desc.substring(0, 300),
+                    fix: hasFix
+                      ? `**Upgrade to ${dep.name}>=${latestFix}:**\n\`\`\`bash\npip install "${dep.name}>=${latestFix}" && pip freeze | grep -i ${dep.name}\n\`\`\`\nThen update \`requirements.txt\` with the new version.`
+                      : `**No patched version available.** ${links.length ? 'Review the advisory (' + links[0] + ') for workarounds.' : ''} Options:\n- If the vulnerable code path is not reachable, add to your risk acceptance log with justification.\n- Consider replacing \`${dep.name}\` with an alternative package.\n- Pin and monitor for a future fix.`,
+                    links,
+                  });
+                }
+              }
+              core.info(`Parsed ${pipCount} pip-audit findings from ${pipFile}`);
+            }
 
             // Trivy SARIF
-            try {
-              const sarif = JSON.parse(fs.readFileSync('scan-results/trivy-results/trivy-results.sarif', 'utf8'));
-              for (const r of (sarif.runs?.[0]?.results || [])) {
-                const ruleId = r.ruleId || 'unknown';
-                const msg = (r.message?.text || '').split('\n')[0].substring(0, 200);
-                findings.push({
-                  source: 'Trivy',
-                  risk: r.level === 'error' ? 'CRITICAL' : 'HIGH',
-                  ruleId,
-                  location: r.locations?.[0]?.physicalLocation?.artifactLocation?.uri || 'requirements.txt',
-                  message: msg,
-                  title: ruleId,
-                  why: msg,
-                  fix: 'Upgrade the affected package to the patched version listed in the CVE advisory.',
-                });
-              }
-            } catch {}
+            const trivyFile = findFile('scan-results', 'trivy-results.sarif');
+            if (trivyFile) {
+              const sarif = readJSON(trivyFile);
+              let trivyCount = 0;
+              for (const run of (sarif?.runs || [])) {
+                const ruleMap = {};
+                for (const rd of (run.tool?.driver?.rules || [])) {
+                  ruleMap[rd.id] = rd;
+                }
+                for (const r of (run.results || [])) {
+                  trivyCount++;
+                  const ruleId = r.ruleId || 'unknown';
+                  const ruleDef = ruleMap[ruleId];
+                  const msg = (r.message?.text || '').split('\n')[0].substring(0, 300);
+                  const sarifLevel = r.level || 'warning';
 
-            // Sort by risk priority
-            findings.sort((a, b) => (riskOrder[a.risk] ?? 99) - (riskOrder[b.risk] ?? 99));
+                  const cveMatch = ruleId.match(/CVE-\d+-\d+/);
+                  const cveId = cveMatch ? cveMatch[0] : '';
+                  const helpUrl = ruleDef?.helpUri || (cveId ? `https://nvd.nist.gov/vuln/detail/${cveId}` : '');
+
+                  const pkgMatch = msg.match(/Package:\s*(\S+)/i) || msg.match(/^(\S+)/);
+                  const verMatch = msg.match(/Installed Version:\s*(\S+)/i);
+                  const fixMatch = msg.match(/Fixed Version:\s*(\S+)/i);
+                  const pkg = pkgMatch?.[1] || '';
+                  const fixVer = fixMatch?.[1] || '';
+
+                  findings.push({
+                    source: 'Trivy',
+                    risk: sarifLevel === 'error' ? 'CRITICAL' : 'HIGH',
+                    location: `\`requirements.txt\` — \`${pkg}${verMatch ? '==' + verMatch[1] : ''}\``,
+                    ruleId: cveId || ruleId,
+                    ruleUrl: helpUrl,
+                    title: `${pkg || ruleId} — ${cveId || ruleId}`,
+                    description: msg,
+                    why: ruleDef?.fullDescription?.text?.substring(0, 300) || msg,
+                    fix: fixVer
+                      ? `**Upgrade to ${pkg}>=${fixVer}:**\n\`\`\`bash\npip install "${pkg}>=${fixVer}" && pip freeze | grep -i ${pkg}\n\`\`\`\nThen update \`requirements.txt\`.`
+                      : `Review the [advisory](${helpUrl}) for mitigation. ${cveId ? `[View on NVD](https://nvd.nist.gov/vuln/detail/${cveId})` : ''}`,
+                    links: cveId ? [`[${cveId}](https://nvd.nist.gov/vuln/detail/${cveId})`] : [],
+                  });
+                }
+              }
+              core.info(`Parsed ${trivyCount} Trivy findings from ${trivyFile}`);
+            }
+
+            // Deduplicate across scanners (same CVE from pip-audit + Trivy)
+            const seen = new Set();
+            const deduped = [];
+            for (const f of findings) {
+              const key = `${f.ruleId}::${f.source}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                deduped.push(f);
+              }
+            }
+            deduped.sort((a, b) => (riskOrder[a.risk] ?? 99) - (riskOrder[b.risk] ?? 99));
 
             // ── Build comment ──
-            const lines = [];
+            const L = [];
 
-            // Header with overall verdict
             if (failCount === 0) {
-              lines.push(`## ✅ Security Pipeline — All Checks Passed`);
-              lines.push(``);
-              lines.push(`All ${passCount} security checks passed. No action required.`);
+              L.push(`## ✅ Security Pipeline — All Checks Passed`);
+              L.push(``);
+              L.push(`All **${passCount}** security checks passed. No action required.`);
             } else {
-              lines.push(`## 🚨 Security Pipeline — ${failCount} Check${failCount > 1 ? 's' : ''} Failed`);
-              lines.push(``);
-              lines.push(`> **This PR cannot be merged until the findings below are resolved or explicitly suppressed.**`);
+              L.push(`## 🚨 Security Pipeline — ${failCount} Check${failCount > 1 ? 's' : ''} Failed`);
+              L.push(``);
+              L.push(`> **This PR cannot be merged** until the findings below are resolved or [explicitly suppressed](https://github.com/hawkeyesectest/security-workflows#suppressing-false-positives).`);
             }
-            lines.push(``);
+            L.push(``);
+
+            // Quick-fix commands (if any dependency findings have fixes)
+            const depFixes = deduped.filter(f =>
+              (f.source === 'pip-audit' || f.source === 'Trivy') && f.fix?.includes('pip install')
+            );
+            if (depFixes.length > 0) {
+              L.push(`### ⚡ Quick Fix`);
+              L.push(``);
+              L.push(`Run this to resolve dependency vulnerabilities:`);
+              L.push(``);
+              L.push('```bash');
+              const fixCmds = new Set();
+              for (const f of depFixes) {
+                const m = f.fix.match(/pip install "([^"]+)"/);
+                if (m) fixCmds.add(`pip install "${m[1]}"`);
+              }
+              for (const cmd of fixCmds) L.push(cmd);
+              L.push(`pip freeze > requirements.txt`);
+              L.push('```');
+              L.push(``);
+            }
 
             // Status table
-            lines.push(`| Check | Category | Result |`);
-            lines.push(`|-------|----------|--------|`);
+            L.push(`### Scanner Results`);
+            L.push(``);
+            L.push(`| Check | Category | Status | |`);
+            L.push(`|:------|:---------|:------:|:-|`);
             for (const j of jobs) {
-              const icon = j.result === 'success' ? '✅' : j.result === 'failure' ? '❌' : '⏭️';
-              lines.push(`| ${icon} ${j.name} | ${j.cat} | \`${j.result}\` |`);
+              let icon, note;
+              if (j.result === 'success') { icon = '✅'; note = ''; }
+              else if (j.result === 'failure') { icon = '❌'; note = `[View logs](${runUrl})`; }
+              else { icon = '⏭️'; note = 'Upstream dependency skipped'; }
+              L.push(`| **${j.name}** | ${j.cat} | ${icon} | ${note} |`);
             }
-            lines.push(``);
+            L.push(``);
 
-            if (findings.length === 0 && failCount > 0) {
-              lines.push(`> ⚠️ Scanners reported failures but no parseable artifacts were found. Check the job logs directly.`);
+            if (skipCount > 0) {
+              L.push(`> **Why were checks skipped?** A skipped check means one of its dependencies failed first. Fix the failed checks and the skipped ones will run on the next push.`);
+              L.push(``);
             }
 
-            if (findings.length > 0) {
-              // Group by risk level
+            // Findings
+            if (deduped.length === 0 && failCount > 0) {
+              L.push(`> ⚠️ Scanners reported failures but no parseable result artifacts were found. [Check the workflow logs](${runUrl}) for details.`);
+            }
+
+            if (deduped.length > 0) {
+              L.push(`---`);
+              L.push(``);
+              L.push(`### 🔍 Findings (${deduped.length} total — sorted by risk)`);
+              L.push(``);
+
               const grouped = {};
-              for (const f of findings) {
+              for (const f of deduped) {
                 if (!grouped[f.risk]) grouped[f.risk] = [];
                 grouped[f.risk].push(f);
               }
 
-              lines.push(`---`);
-              lines.push(``);
-              lines.push(`### Findings by Risk Level`);
-              lines.push(``);
-
-              let findingNum = 0;
+              let n = 0;
               for (const risk of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']) {
                 const items = grouped[risk];
                 if (!items?.length) continue;
 
-                const icon = riskIcon[risk] || '⚪';
-                lines.push(`<details ${risk === 'CRITICAL' || risk === 'HIGH' ? 'open' : ''}>`);
-                lines.push(`<summary>${icon} <strong>${risk}</strong> — ${items.length} finding${items.length > 1 ? 's' : ''}</summary>`);
-                lines.push(``);
+                const icon = riskIcon[risk];
+                const open = risk === 'CRITICAL' || risk === 'HIGH' ? ' open' : '';
+                L.push(`<details${open}>`);
+                L.push(`<summary>${icon} <strong>${risk}</strong> — ${items.length} finding${items.length > 1 ? 's' : ''}</summary>`);
+                L.push(``);
 
                 for (const f of items) {
-                  findingNum++;
-                  lines.push(`#### ${findingNum}. ${f.title}`);
-                  lines.push(``);
-                  lines.push(`| | |`);
-                  lines.push(`|---|---|`);
-                  lines.push(`| **Scanner** | ${f.source} |`);
-                  lines.push(`| **Location** | \`${f.location}\` |`);
-                  lines.push(`| **Rule** | \`${f.ruleId}\` |`);
-                  lines.push(``);
-                  if (f.why) {
-                    lines.push(`**Why this matters:** ${f.why}`);
-                    lines.push(``);
+                  n++;
+                  L.push(`---`);
+                  L.push(``);
+                  L.push(`#### ${n}. ${f.title}`);
+                  L.push(``);
+
+                  // Metadata row
+                  const refs = [];
+                  if (f.ruleUrl) refs.push(`[Rule docs](${f.ruleUrl})`);
+                  if (f.links?.length) refs.push(...f.links);
+
+                  L.push(`> **${f.source}** · ${f.location}${refs.length ? ' · ' + refs.join(' · ') : ''}`);
+                  L.push(``);
+
+                  // What & Why
+                  if (f.description && f.description !== f.why) {
+                    L.push(`**What was found:** ${f.description}`);
+                    L.push(``);
                   }
-                  lines.push(`**How to fix:**`);
-                  lines.push(`> ${f.fix}`);
-                  lines.push(``);
+                  L.push(`**Why this matters:** ${f.why}`);
+                  L.push(``);
+
+                  // Fix
+                  L.push(`<details>`);
+                  L.push(`<summary>🔧 <strong>How to fix</strong></summary>`);
+                  L.push(``);
+                  L.push(f.fix);
+                  L.push(``);
+                  L.push(`</details>`);
+                  L.push(``);
                 }
 
-                lines.push(`</details>`);
-                lines.push(``);
+                L.push(`</details>`);
+                L.push(``);
               }
             }
 
             // Footer
-            lines.push(`---`);
-            lines.push(``);
-            lines.push(`<details>`);
-            lines.push(`<summary>ℹ️ About this comment</summary>`);
-            lines.push(``);
-            lines.push(`This comment is auto-generated by the [centralized security pipeline](https://github.com/hawkeyesectest/security-workflows). It updates on each push to this PR.`);
-            lines.push(``);
-            lines.push(`**False positive?** Add a suppression comment with justification — see the [suppression guide](https://github.com/hawkeyesectest/security-workflows#suppressing-false-positives).`);
-            lines.push(``);
-            lines.push(`</details>`);
+            L.push(`---`);
+            L.push(``);
+            L.push(`<details>`);
+            L.push(`<summary>ℹ️ About this comment</summary>`);
+            L.push(``);
+            L.push(`Auto-generated by the [centralized security pipeline](https://github.com/hawkeyesectest/security-workflows). Updates on each push.`);
+            L.push(``);
+            L.push(`- **False positive?** Add a \`# nosec\` / \`# nosemgrep\` inline comment with justification`);
+            L.push(`- **Risk accepted?** Document in your repo's \`SECURITY.md\` and add to the suppression config`);
+            L.push(`- **Need help?** Tag \`@security-team\` on this PR`);
+            L.push(``);
+            L.push(`</details>`);
 
-            const body = lines.join('\n');
+            const body = L.join('\n');
 
-            // ── Post or update the comment ──
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
             });
+            const marker = '<!-- security-pipeline-summary -->';
             const existing = comments.find(c =>
               c.user?.login === 'github-actions[bot]' &&
-              c.body?.includes('Security Pipeline')
+              (c.body?.includes(marker) || c.body?.includes('Security Pipeline'))
             );
+
+            const fullBody = marker + '\n' + body;
 
             if (existing) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 comment_id: existing.id,
-                body,
+                body: fullBody,
               });
-              core.info(`Updated existing comment ${existing.id}`);
+              core.info(`Updated comment ${existing.id}`);
             } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body,
+                body: fullBody,
               });
               core.info('Created new comment');
             }
