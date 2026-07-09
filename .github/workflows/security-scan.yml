@@ -85,7 +85,7 @@ jobs:
       # tries to authenticate with an AWS key). This eliminates
       # most false positives but requires network access.
       - name: Run TruffleHog
-        uses: trufflesecurity/trufflehog@586f66d7886cd0b037c7c245d4a6e34ef357ab10 # v3.88+
+        uses: trufflesecurity/trufflehog@00155c9dc586f34d189adc83d3ac2698c2ec551f # v3.88+
         with:
           extra_args: --only-verified --results=verified
 
@@ -195,7 +195,7 @@ jobs:
       # pipeline only fails on things that genuinely need
       # immediate patching.
       - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # v0.29.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
         with:
           scan-type: fs
           scan-ref: ${{ inputs.scan-path }}
@@ -266,7 +266,7 @@ jobs:
       # inventory. SPDX-JSON is the most widely accepted
       # SBOM format for compliance/legal review.
       - name: Generate SBOM with Syft
-        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.18.0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.18.0
         with:
           path: ${{ inputs.scan-path }}
           format: spdx-json
