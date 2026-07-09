@@ -1,0 +1,123 @@
+# .gitleaks.toml
+#
+# Gitleaks scans git history for secrets using regex + entropy.
+# This config extends the built-in rules with patterns specific
+# to cloud providers and AI APIs commonly used in Python apps.
+#
+# How it works:
+#   1. Gitleaks walks every commit in git history (fetch-depth: 0)
+#   2. For each diff, it applies regex rules to find matches
+#   3. Entropy checks catch high-randomness strings that look
+#      like keys even if they don't match a known pattern
+#   4. Allowlists prevent false positives on test data
+
+title = "Gitleaks Configuration"
+
+[extend]
+# Start from the built-in default ruleset, then add ours on top
+useDefault = true
+
+# ── CUSTOM RULES ──────────────────────────────
+# Each rule needs:
+#   id          - unique identifier for triage/suppression
+#   description - what it catches (shown in findings)
+#   regex       - the pattern to match
+#   secretGroup - which capture group contains the secret (for masking)
+#   keywords    - fast pre-filter; gitleaks skips files without these
+
+[[rules]]
+id = "aws-access-key-id"
+description = "AWS Access Key ID"
+# AWS access keys always start with AKIA followed by 16 alphanumeric chars
+regex = '''(?i)\b(AKIA[0-9A-Z]{16})\b'''
+secretGroup = 1
+keywords = ["AKIA"]
+
+[[rules]]
+id = "aws-secret-access-key"
+description = "AWS Secret Access Key"
+# Secret keys are 40-char base64 strings, usually assigned to a variable
+regex = '''(?i)(?:aws_secret_access_key|aws_secret_key|secret_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?'''
+secretGroup = 1
+keywords = ["aws_secret", "secret_key"]
+
+[[rules]]
+id = "gcp-service-account-key"
+description = "GCP Service Account Key (private_key_id)"
+# GCP JSON key files contain a private_key_id field
+regex = '''"private_key_id"\s*:\s*"([a-f0-9]{40})"'''
+secretGroup = 1
+keywords = ["private_key_id"]
+
+[[rules]]
+id = "gcp-api-key"
+description = "GCP API Key"
+# GCP API keys start with AIza and are 39 chars total
+regex = '''(?i)\b(AIza[0-9A-Za-z_-]{35})\b'''
+secretGroup = 1
+keywords = ["AIza"]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API Key"
+# OpenAI keys use the sk-proj- or sk- prefix
+regex = '''(?i)\b(sk-(?:proj-)?[A-Za-z0-9_-]{20,120})\b'''
+secretGroup = 1
+keywords = ["sk-"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API Key"
+# Anthropic keys use the sk-ant- prefix
+regex = '''(?i)\b(sk-ant-[A-Za-z0-9_-]{20,120})\b'''
+secretGroup = 1
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "generic-high-entropy-secret"
+description = "High-entropy string assigned to a secret-like variable"
+regex = '''(?i)(?:secret|token|password|api_key|apikey|auth)\s*[=:]\s*['"]([A-Za-z0-9/+=_-]{24,})['"]'''
+secretGroup = 1
+keywords = ["secret", "token", "password", "api_key", "apikey", "auth"]
+[rules.entropy]
+# Shannon entropy threshold. English text is ~3.5 bits/char;
+# random keys are ~5.0+. 4.5 balances detection vs false positives.
+Min = 4.5
+Group = 1
+
+# ── ENTROPY SETTINGS ──────────────────────────
+# These apply to the built-in default rules as well
+[entropy]
+# Entropy-only detection (no regex match needed) for
+# strings that look random enough to be secrets
+enabled = false
+# We keep this off globally and use per-rule entropy
+# (above) because broad entropy scanning is noisy
+
+# ── ALLOWLIST ─────────────────────────────────
+# Prevents false positives on files that intentionally
+# contain fake/test credentials
+[allowlist]
+description = "Global allowlist"
+
+# Path patterns to skip entirely
+paths = [
+    '''(?i)tests?/fixtures/''',
+    '''(?i)tests?/data/''',
+    '''(?i)tests?/mocks?/''',
+    '''(?i)examples?/''',
+    '''(?i)docs?/''',
+    '''(?i)\.gitleaks\.toml$''',
+    '''(?i)\.semgrep/''',
+    '''(?i)go\.sum$''',
+    '''(?i)package-lock\.json$''',
+    '''(?i)poetry\.lock$''',
+    '''(?i)Pipfile\.lock$''',
+]
+
+# Specific values that are known false positives
+regexes = [
+    '''EXAMPLE_[A-Z_]+''',
+    '''(?i)fake|dummy|test|sample|placeholder|changeme|xxx''',
+    '''(?i)sk-test-[a-z0-9]+''',
+]

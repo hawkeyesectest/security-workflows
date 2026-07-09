@@ -1,0 +1,205 @@
+# .semgrep/rules.yml
+#
+# Custom Semgrep rules for patterns that the default rulesets miss
+# or that are specific to your org's coding standards.
+#
+# Semgrep pattern syntax:
+#   - `...`  matches any sequence of arguments/statements
+#   - `$VAR` matches and captures any single expression
+#   - Metavariables like $FUNC, $DATA carry the matched value
+#     into the `message` via interpolation
+#   - `pattern-either` is logical OR across patterns
+#   - `pattern-not` excludes specific safe patterns
+
+rules:
+
+  # ── JWT VALIDATION ──────────────────────────
+  # PyJWT's decode() requires you to explicitly pass
+  # `audience` and `issuer` — without them, a token
+  # minted for service-A is accepted by service-B,
+  # breaking tenant isolation.
+
+  - id: jwt-decode-missing-audience
+    languages: [python]
+    severity: ERROR
+    message: >
+      jwt.decode() called without `audience` parameter.
+      An attacker can reuse a token intended for a different
+      service. Always pass `audience=` to validate the `aud` claim.
+    metadata:
+      cwe: "CWE-287: Improper Authentication"
+      confidence: HIGH
+      references:
+        - https://pyjwt.readthedocs.io/en/stable/usage.html
+    patterns:
+      - pattern: jwt.decode($TOKEN, $KEY, ...)
+      - pattern-not: jwt.decode($TOKEN, $KEY, ..., audience=..., ...)
+
+  - id: jwt-decode-missing-issuer
+    languages: [python]
+    severity: ERROR
+    message: >
+      jwt.decode() called without `issuer` parameter.
+      Without issuer validation, tokens from untrusted identity
+      providers will be accepted. Always pass `issuer=`.
+    metadata:
+      cwe: "CWE-287: Improper Authentication"
+      confidence: HIGH
+    patterns:
+      - pattern: jwt.decode($TOKEN, $KEY, ...)
+      - pattern-not: jwt.decode($TOKEN, $KEY, ..., issuer=..., ...)
+
+  # ── LOGGING SENSITIVE DATA ──────────────────
+  # Logging passwords, tokens, or keys sends them to
+  # log aggregators (Datadog, Splunk, CloudWatch) where
+  # they persist, get indexed, and are visible to anyone
+  # with log access — massively expanding blast radius.
+
+  - id: sensitive-data-in-logs
+    languages: [python]
+    severity: WARNING
+    message: >
+      Potentially sensitive variable `$DATA` is being logged.
+      Credentials in logs persist in aggregation systems and
+      are accessible to anyone with log reader permissions.
+    metadata:
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: logging.$METHOD(..., $DATA, ...)
+          - pattern: logger.$METHOD(..., $DATA, ...)
+          - pattern: log.$METHOD(..., $DATA, ...)
+      - metavariable-regex:
+          metavariable: $DATA
+          regex: (?i).*(password|passwd|secret|token|api_key|apikey|auth|credential|private_key).*
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: (debug|info|warning|error|critical|exception|log)
+
+  # ── SQL INJECTION ───────────────────────────
+  # String formatting/concatenation in SQL means user
+  # input becomes part of the query structure, not just
+  # a parameter. Use parameterized queries instead.
+
+  - id: sql-string-formatting
+    languages: [python]
+    severity: ERROR
+    message: >
+      SQL query built with string formatting (f-string, .format, or %).
+      This is the textbook SQL injection pattern. Use parameterized
+      queries: `cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))`
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      owasp: "A03:2021 Injection"
+      confidence: HIGH
+    pattern-either:
+      - pattern: $CURSOR.execute(f"...{$VAR}...")
+      - pattern: $CURSOR.execute("..." % $VAR)
+      - pattern: $CURSOR.execute("...".format(...))
+      - pattern: $CURSOR.execute("..." + $VAR + "...")
+
+  # ── TLS VERIFICATION DISABLED ───────────────
+  # verify=False disables certificate validation,
+  # meaning any MITM attacker with a self-signed cert
+  # can intercept the connection. In production this
+  # is never acceptable.
+
+  - id: requests-verify-disabled
+    languages: [python]
+    severity: ERROR
+    message: >
+      HTTP request made with `verify=False`, disabling TLS
+      certificate validation. This allows man-in-the-middle attacks.
+      Remove `verify=False` or configure a proper CA bundle.
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+      owasp: "A07:2021 Identification and Authentication Failures"
+      confidence: HIGH
+    pattern-either:
+      - pattern: requests.get(..., verify=False, ...)
+      - pattern: requests.post(..., verify=False, ...)
+      - pattern: requests.put(..., verify=False, ...)
+      - pattern: requests.patch(..., verify=False, ...)
+      - pattern: requests.delete(..., verify=False, ...)
+      - pattern: requests.head(..., verify=False, ...)
+      - pattern: requests.request(..., verify=False, ...)
+      - pattern: httpx.get(..., verify=False, ...)
+      - pattern: httpx.post(..., verify=False, ...)
+      - pattern: httpx.Client(..., verify=False, ...)
+      - pattern: httpx.AsyncClient(..., verify=False, ...)
+
+  # ── HARDCODED SECRETS ───────────────────────
+  # Secrets in source code end up in git history
+  # permanently (even after deletion) and are trivially
+  # extractable. Use environment variables or a vault.
+
+  - id: hardcoded-secret-assignment
+    languages: [python]
+    severity: ERROR
+    message: >
+      Possible hardcoded secret in variable `$VAR`. Secrets
+      in source code persist in git history and are easily
+      extracted. Use environment variables or a secrets manager.
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      confidence: MEDIUM
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i).*(secret|password|passwd|api_key|apikey|token|private_key|auth_token|access_key|secret_key).*
+      - pattern-not: $VAR = ""
+      - pattern-not: $VAR = "changeme"
+      - pattern-not: $VAR = "PLACEHOLDER"
+      - pattern-not: $VAR = os.environ[...]
+      - pattern-not: $VAR = os.getenv(...)
+
+  # ── WEAK HASHING ────────────────────────────
+  # MD5 and SHA-1 have known collision attacks.
+  # For password hashing use bcrypt/argon2; for
+  # integrity use SHA-256+.
+
+  - id: weak-hash-for-security
+    languages: [python]
+    severity: WARNING
+    message: >
+      `$FUNC` uses a hash algorithm with known collision
+      attacks. Use SHA-256+ for integrity checks or
+      bcrypt/argon2id for password hashing.
+    metadata:
+      cwe: "CWE-328: Use of Weak Hash"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+      - pattern: hashlib.new("md5", ...)
+      - pattern: hashlib.new("sha1", ...)
+
+  # ── PATH TRAVERSAL ─────────────────────────
+  # If user input flows into file-open operations
+  # without sanitization, an attacker can read/write
+  # arbitrary files (../../etc/passwd).
+
+  - id: path-traversal-open
+    languages: [python]
+    severity: ERROR
+    message: >
+      User-supplied input used directly in file path.
+      An attacker can use `../` sequences to read or
+      overwrite files outside the intended directory.
+      Use `os.path.realpath()` and verify the resolved
+      path starts with an allowed base directory.
+    metadata:
+      cwe: "CWE-22: Path Traversal"
+      owasp: "A01:2021 Broken Access Control"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: open(request.$ATTR, ...)
+      - pattern: open(f"...{request.$ATTR}...", ...)
+      - pattern: |
+          $PATH = request.$ATTR
+          ...
+          open($PATH, ...)
+      - pattern: pathlib.Path(request.$ATTR)
+      - pattern: os.path.join(..., request.$ATTR, ...)

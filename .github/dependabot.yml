@@ -1,0 +1,68 @@
+# .github/dependabot.yml
+#
+# Dependabot automatically opens PRs when a dependency has a
+# newer version available. It checks two ecosystems here:
+#
+# 1. pip (Python packages) — catches security patches in your
+#    application dependencies
+# 2. github-actions — catches updates to the Actions you call,
+#    which is critical because a compromised Action version
+#    can exfiltrate your secrets
+#
+# Grouping minor+patch updates into a single PR reduces review
+# fatigue while still giving you individual PRs for major bumps
+# (which are more likely to break things).
+
+version: 2
+
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "security"
+    reviewers:
+      - "your-org/security-team"
+    groups:
+      # Bundle all non-major Python updates into one PR
+      python-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "security"
+      - "ci"
+    reviewers:
+      - "your-org/security-team"
+    groups:
+      # Bundle all Actions patch updates together
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

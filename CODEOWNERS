@@ -1,0 +1,88 @@
+# CODEOWNERS
+#
+# GitHub requires reviews from the listed teams/users when a PR
+# modifies files matching these patterns. This enforces that
+# security-sensitive code paths can't be merged without review
+# from someone with domain expertise.
+#
+# How it works:
+#   - GitHub evaluates patterns top-to-bottom, last match wins
+#   - Patterns use the same syntax as .gitignore
+#   - Teams must be given write access to the repo
+#   - Enable "Require review from Code Owners" in branch protection
+#
+# Replace @your-org/security-team and @your-org/platform-team
+# with your actual GitHub team slugs.
+
+# ── DEFAULT ───────────────────────────────────
+# Fallback: platform team reviews everything not
+# covered by a more specific rule below
+*                                   @your-org/platform-team
+
+# ── AUTHENTICATION & AUTHORIZATION ────────────
+# Auth logic is the #1 target for attackers.
+# Mistakes here bypass everything else.
+**/auth/                            @your-org/security-team
+**/authentication/                  @your-org/security-team
+**/authorization/                   @your-org/security-team
+**/middleware/auth*                  @your-org/security-team
+**/oauth/                           @your-org/security-team
+**/sso/                             @your-org/security-team
+**/jwt*                             @your-org/security-team
+**/permissions/                     @your-org/security-team
+**/rbac/                            @your-org/security-team
+
+# ── CRYPTOGRAPHY ──────────────────────────────
+# Rolling your own crypto is a common source of
+# vulnerabilities. Expert review is essential.
+**/crypto/                          @your-org/security-team
+**/encryption/                      @your-org/security-team
+**/signing/                         @your-org/security-team
+**/certificates/                    @your-org/security-team
+**/tls/                             @your-org/security-team
+**/keys/                            @your-org/security-team
+
+# ── ENVIRONMENT & CONFIGURATION ───────────────
+# Config files often contain secrets references,
+# service URLs, and feature flags that affect security.
+.env*                               @your-org/security-team @your-org/platform-team
+**/config/                          @your-org/security-team @your-org/platform-team
+**/settings/                        @your-org/security-team @your-org/platform-team
+*.toml                              @your-org/platform-team
+*.yaml                              @your-org/platform-team
+*.yml                               @your-org/platform-team
+
+# ── CI/CD WORKFLOWS ──────────────────────────
+# Workflows have access to secrets and can deploy
+# code. A compromised workflow = compromised production.
+.github/                            @your-org/security-team @your-org/platform-team
+.github/workflows/                  @your-org/security-team
+
+# ── INFRASTRUCTURE AS CODE ────────────────────
+# IaC defines network rules, IAM policies, and
+# compute configuration. Misconfig = open S3 buckets.
+**/terraform/                       @your-org/security-team @your-org/platform-team
+**/cloudformation/                  @your-org/security-team @your-org/platform-team
+**/pulumi/                          @your-org/security-team @your-org/platform-team
+**/k8s/                             @your-org/security-team @your-org/platform-team
+**/kubernetes/                      @your-org/security-team @your-org/platform-team
+**/helm/                            @your-org/security-team @your-org/platform-team
+**/docker-compose*.yml              @your-org/security-team @your-org/platform-team
+Dockerfile*                         @your-org/security-team @your-org/platform-team
+
+# ── SECURITY TOOLING CONFIG ──────────────────
+# Changes to security scanner configs could
+# silence alerts. Require security team review.
+.semgrep/                           @your-org/security-team
+.gitleaks.toml                      @your-org/security-team
+.trivyignore                        @your-org/security-team
+CODEOWNERS                          @your-org/security-team
+
+# ── DEPENDENCY MANAGEMENT ────────────────────
+# New dependencies expand attack surface.
+# Security review catches typosquatting and
+# unnecessary transitive dependency chains.
+requirements*.txt                   @your-org/security-team @your-org/platform-team
+Pipfile*                            @your-org/security-team @your-org/platform-team
+pyproject.toml                      @your-org/security-team @your-org/platform-team
+poetry.lock                         @your-org/security-team @your-org/platform-team
