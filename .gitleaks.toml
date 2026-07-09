@@ -79,20 +79,9 @@ description = "High-entropy string assigned to a secret-like variable"
 regex = '''(?i)(?:secret|token|password|api_key|apikey|auth)\s*[=:]\s*['"]([A-Za-z0-9/+=_-]{24,})['"]'''
 secretGroup = 1
 keywords = ["secret", "token", "password", "api_key", "apikey", "auth"]
-[rules.entropy]
-# Shannon entropy threshold. English text is ~3.5 bits/char;
-# random keys are ~5.0+. 4.5 balances detection vs false positives.
-Min = 4.5
-Group = 1
-
-# ── ENTROPY SETTINGS ──────────────────────────
-# These apply to the built-in default rules as well
-[entropy]
-# Entropy-only detection (no regex match needed) for
-# strings that look random enough to be secrets
-enabled = false
-# We keep this off globally and use per-rule entropy
-# (above) because broad entropy scanning is noisy
+# Shannon entropy threshold (4.5 bits/char).
+# English text is ~3.5; random keys are ~5.0+.
+entropy = 4.5
 
 # ── ALLOWLIST ─────────────────────────────────
 # Prevents false positives on files that intentionally
