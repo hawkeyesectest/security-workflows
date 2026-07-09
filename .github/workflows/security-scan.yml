@@ -47,7 +47,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
   actions: read
 
 jobs:
@@ -124,16 +123,12 @@ jobs:
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-      # SARIF (Static Analysis Results Interchange Format)
-      # is a standard JSON format. Uploading it here makes
-      # findings appear in the repo's Security > Code scanning tab,
-      # with inline PR annotations on the affected lines.
-      - name: Upload SARIF to GitHub Security tab
+      - name: Upload Semgrep SARIF artifact
         if: always()
-        uses: github/codeql-action/upload-sarif@4dd16135b69a43b6c8efb853346f8437d92d3c93 # v3.26.6
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          sarif_file: semgrep-results.sarif
-          category: semgrep
+          name: semgrep-results
+          path: semgrep-results.sarif
 
   # ──────────────────────────────────────────────
   # DEPENDENCY / SUPPLY CHAIN SCANNING
@@ -209,12 +204,12 @@ jobs:
           output: trivy-results.sarif
           exit-code: 1
 
-      - name: Upload Trivy SARIF
+      - name: Upload Trivy SARIF artifact
         if: always()
-        uses: github/codeql-action/upload-sarif@4dd16135b69a43b6c8efb853346f8437d92d3c93 # v3.26.6
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          sarif_file: trivy-results.sarif
-          category: trivy
+          name: trivy-results
+          path: trivy-results.sarif
 
   socket:
     name: "Supply Chain: Socket.dev"
@@ -290,12 +285,12 @@ jobs:
           fail-build: true
           output-format: sarif
 
-      - name: Upload Grype SARIF
+      - name: Upload Grype SARIF artifact
         if: always()
-        uses: github/codeql-action/upload-sarif@4dd16135b69a43b6c8efb853346f8437d92d3c93 # v3.26.6
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          sarif_file: results.sarif
-          category: grype
+          name: grype-results
+          path: results.sarif
 
       - name: Upload SBOM artifact
         if: always()
