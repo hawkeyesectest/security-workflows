@@ -278,7 +278,7 @@ jobs:
       # separate from Trivy intentionally — defense in depth
       # means no single tool's blind spot leaves you exposed.
       - name: Scan SBOM with Grype
-        uses: anchore/scan-action@2c901ab7378897c01b8efaa2d0c9bf519cc64b9e # v5.4.0
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v5.4.0
         with:
           sbom: sbom.spdx.json
           severity-cutoff: ${{ inputs.severity-threshold }}
