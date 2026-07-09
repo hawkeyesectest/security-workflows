@@ -1,0 +1,12 @@
+name: Minimal Test
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    name: "Smoke Test"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hello
+        run: echo "Reusable workflow is working"
