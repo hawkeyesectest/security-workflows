@@ -1,0 +1,646 @@
+name: Supply Chain Security
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version for dependency resolution"
+        required: false
+        type: string
+        default: "3.12"
+      severity-threshold:
+        description: "Minimum severity to fail on (CRITICAL, HIGH, MEDIUM, LOW)"
+        required: false
+        type: string
+        default: "high"
+      license-check:
+        description: "Enable license compliance scanning"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+  id-token: write
+  attestations: write
+
+jobs:
+
+  # ── Dependency Integrity ──────────────────────────────────────────────
+
+  lock-file:
+    name: "Integrity: Lock File"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Verify lock file integrity
+        run: |
+          pip install pip-tools
+
+          if [ ! -f requirements.in ]; then
+            echo "::error::Missing requirements.in — dependencies must be declared in requirements.in and compiled with pip-compile --generate-hashes"
+            exit 1
+          fi
+
+          if ! head -20 requirements.txt | grep -q -- '--hash='; then
+            echo "::error::requirements.txt is missing hash pins. Regenerate with: pip-compile --generate-hashes -o requirements.txt requirements.in"
+            exit 1
+          fi
+
+          pip-compile --generate-hashes --output-file /tmp/requirements-check.txt requirements.in --quiet
+
+          if ! diff -u requirements.txt /tmp/requirements-check.txt > /tmp/lock-diff.txt 2>&1; then
+            echo "::error::requirements.txt is out of sync with requirements.in. Run: pip-compile --generate-hashes -o requirements.txt requirements.in"
+            echo ""
+            echo "Diff:"
+            cat /tmp/lock-diff.txt
+            exit 1
+          fi
+
+          echo "Lock file is up-to-date and hash-pinned."
+
+  dependency-review:
+    name: "Integrity: Dependency Review"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Dependency Review
+        uses: actions/dependency-review-action@ce3cf9537a52e8119d91fd484ab5b8a807627bf8 # v4.6.0
+        with:
+          fail-on-severity: ${{ inputs.severity-threshold }}
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0-only, AGPL-3.0-or-later, SSPL-1.0, EUPL-1.1, EUPL-1.2
+          comment-summary-in-pr: always
+
+  # ── Vulnerability Scanning ────────────────────────────────────────────
+
+  pip-audit:
+    name: "Vulns: pip-audit"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install and audit
+        id: audit
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip install --require-hashes -r requirements.txt
+          pip-audit --requirement requirements.txt --format json --output pip-audit-results.json --desc
+      - name: Upload results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pip-audit-results
+          path: pip-audit-results.json
+          if-no-files-found: ignore
+      - name: Fail on findings
+        if: steps.audit.outcome == 'failure'
+        run: exit 1
+
+  trivy:
+    name: "Vulns: Trivy"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Run Trivy
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # v0.29
+        with:
+          scan-type: fs
+          scan-ref: "."
+          severity: "CRITICAL,HIGH"
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "1"
+      - name: Upload results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          if-no-files-found: ignore
+      - name: Fail on findings
+        if: steps.trivy.outcome == 'failure'
+        run: exit 1
+
+  # ── License Compliance ────────────────────────────────────────────────
+
+  license-check:
+    name: "Policy: License Compliance"
+    runs-on: ubuntu-latest
+    if: inputs.license-check
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Scan licenses with Trivy
+        id: license-scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # v0.29
+        with:
+          scan-type: fs
+          scan-ref: "."
+          scanners: license
+          severity: "UNKNOWN,HIGH,CRITICAL"
+          format: json
+          output: license-results.json
+          exit-code: "1"
+      - name: Check denied licenses
+        run: |
+          DENIED="GPL-2.0 GPL-3.0 AGPL-3.0 SSPL-1.0 EUPL-1.1 EUPL-1.2"
+
+          if [ ! -f license-results.json ]; then
+            echo "No license scan results found."
+            exit 0
+          fi
+
+          violations=0
+          for lic in $DENIED; do
+            matches=$(python3 -c "
+          import json, sys
+          data = json.load(open('license-results.json'))
+          results = data.get('Results', [])
+          for r in results:
+            for l in r.get('Licenses', []):
+              if '$lic' in l.get('Name', ''):
+                print(f\"  DENIED: {l.get('PkgName','?')} uses {l.get('Name','?')}\")
+          " 2>/dev/null)
+            if [ -n "$matches" ]; then
+              echo "::error::Denied license $lic found:"
+              echo "$matches"
+              violations=1
+            fi
+          done
+
+          if [ "$violations" -eq 1 ]; then
+            exit 1
+          fi
+          echo "All licenses are compliant."
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: license-results
+          path: license-results.json
+          if-no-files-found: ignore
+
+  # ── SBOM & Provenance ─────────────────────────────────────────────────
+
+  sbom:
+    name: "SBOM: Generate & Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0
+        with:
+          path: "."
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - name: Scan SBOM for CVEs
+        id: grype
+        continue-on-error: true
+        uses: anchore/scan-action@2c901ab7378897c01b8efaa2d0c9bf519cc64b9e # v5
+        with:
+          sbom: sbom.spdx.json
+          severity-cutoff: ${{ inputs.severity-threshold }}
+          fail-build: "true"
+          output-format: sarif
+      - name: Upload Grype results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: grype-results
+          path: results.sarif
+          if-no-files-found: ignore
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-spdx
+          path: sbom.spdx.json
+          retention-days: 90
+      - name: Attest SBOM
+        if: always()
+        uses: actions/attest-sbom@115c3be05ff3974bcbd596578934b3f9ce39bf68 # v2.2.0
+        with:
+          subject-path: sbom.spdx.json
+          sbom-format: spdx+json
+        continue-on-error: true
+      - name: Fail on CVE findings
+        if: steps.grype.outcome == 'failure'
+        run: exit 1
+
+  provenance:
+    name: "Provenance: Build Attestation"
+    runs-on: ubuntu-latest
+    needs:
+      - lock-file
+      - pip-audit
+      - trivy
+      - sbom
+    if: always()
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd # v2.3.0
+        with:
+          subject-path: requirements.txt
+        continue-on-error: true
+
+  # ── Repo Health ───────────────────────────────────────────────────────
+
+  scorecard:
+    name: "Health: OpenSSF Scorecard"
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@ff5dd8929f96a8a4dc67d13f32b8c75057829621 # v2.4.3
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: false
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scorecard-results
+          path: scorecard-results.sarif
+          if-no-files-found: ignore
+
+  # ── Supply Chain Gate ─────────────────────────────────────────────────
+
+  supply-chain-gate:
+    name: "Supply Chain Gate"
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lock-file
+      - dependency-review
+      - pip-audit
+      - trivy
+      - license-check
+      - sbom
+    steps:
+      - name: Evaluate results
+        run: |
+          failed=0
+          summary=""
+          for pair in \
+            "Lock File:${{ needs.lock-file.result }}" \
+            "Dependency Review:${{ needs.dependency-review.result }}" \
+            "pip-audit:${{ needs.pip-audit.result }}" \
+            "Trivy:${{ needs.trivy.result }}" \
+            "License Check:${{ needs.license-check.result }}" \
+            "SBOM/Grype:${{ needs.sbom.result }}"; do
+            name="${pair%%:*}"
+            result="${pair##*:}"
+            icon="✅"
+            if [ "$result" = "failure" ]; then
+              icon="❌"
+              failed=1
+            elif [ "$result" = "skipped" ]; then
+              icon="⏭️"
+            fi
+            summary="$summary| $icon $name | $result |\n"
+          done
+
+          {
+            echo "## 🔗 Supply Chain Gate Results"
+            echo ""
+            echo "| Check | Result |"
+            echo "|-------|--------|"
+            echo -e "$summary"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$failed" -eq 1 ]; then
+            echo "::error::Supply chain gate FAILED — one or more checks did not pass."
+            exit 1
+          fi
+          echo "All supply chain checks passed."
+
+  # ── PR Summary Comment ────────────────────────────────────────────────
+
+  summary-comment:
+    name: "Summary: PR Comment"
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - lock-file
+      - dependency-review
+      - pip-audit
+      - trivy
+      - license-check
+      - sbom
+      - provenance
+      - supply-chain-gate
+    steps:
+      - name: Download scan artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: scan-results
+        continue-on-error: true
+
+      - name: Build and post summary comment
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            function readJSON(fp) {
+              try { return JSON.parse(fs.readFileSync(fp, 'utf8')); }
+              catch { return null; }
+            }
+            function findFile(dir, name) {
+              try {
+                for (const e of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) {
+                  if (e.name === name) return path.join(e.parentPath || e.path || dir, e.name);
+                }
+              } catch {}
+              return null;
+            }
+
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const jobs = [
+              { name: 'Lock File',         cat: 'Integrity',      result: '${{ needs.lock-file.result }}' },
+              { name: 'Dependency Review', cat: 'Integrity',      result: '${{ needs.dependency-review.result }}' },
+              { name: 'pip-audit',         cat: 'Vulnerabilities', result: '${{ needs.pip-audit.result }}' },
+              { name: 'Trivy',             cat: 'Vulnerabilities', result: '${{ needs.trivy.result }}' },
+              { name: 'License Check',     cat: 'Policy',          result: '${{ needs.license-check.result }}' },
+              { name: 'SBOM/Grype',        cat: 'SBOM',            result: '${{ needs.sbom.result }}' },
+              { name: 'Provenance',        cat: 'Attestation',     result: '${{ needs.provenance.result }}' },
+            ];
+            const gateResult = '${{ needs.supply-chain-gate.result }}';
+            const failCount = jobs.filter(j => j.result === 'failure').length;
+            const passCount = jobs.filter(j => j.result === 'success').length;
+
+            const riskOrder = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
+            const riskIcon  = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '🔵', INFO: 'ℹ️' };
+
+            const findings = [];
+
+            // ── pip-audit JSON ──
+            const pipFile = findFile('scan-results', 'pip-audit-results.json');
+            if (pipFile) {
+              const data = readJSON(pipFile);
+              for (const dep of (data?.dependencies || [])) {
+                for (const v of (dep.vulns || [])) {
+                  const cveId = v.aliases?.find(a => a.startsWith('CVE-')) || '';
+                  const ghsaId = v.aliases?.find(a => a.startsWith('GHSA-')) || '';
+                  const desc = v.description || 'Known vulnerability';
+                  const hasFix = v.fix_versions?.length > 0;
+                  const latestFix = hasFix ? v.fix_versions[v.fix_versions.length - 1] : null;
+
+                  const links = [];
+                  if (cveId) links.push(`[${cveId}](https://nvd.nist.gov/vuln/detail/${cveId})`);
+                  if (ghsaId) links.push(`[${ghsaId}](https://github.com/advisories/${ghsaId})`);
+                  if (v.id?.startsWith('PYSEC-')) links.push(`[${v.id}](https://osv.dev/vulnerability/${v.id})`);
+
+                  findings.push({
+                    source: 'pip-audit',
+                    risk: desc.toLowerCase().includes('remote code') ? 'CRITICAL' : 'HIGH',
+                    location: `\`requirements.txt\` — \`${dep.name}==${dep.version}\``,
+                    ruleId: v.id,
+                    title: `${dep.name} ${dep.version} — ${cveId || v.id}`,
+                    description: desc.substring(0, 300),
+                    fix: hasFix
+                      ? `**Upgrade to ${dep.name}>=${latestFix}:**\n\`\`\`bash\npip install "${dep.name}>=${latestFix}"\npip-compile --generate-hashes -o requirements.txt requirements.in\n\`\`\``
+                      : `**No patched version available.** ${links.length ? 'Review the advisory: ' + links[0] : ''}\n- If unreachable code path, add to risk acceptance log\n- Consider replacing \`${dep.name}\` with an alternative`,
+                    links,
+                  });
+                }
+              }
+            }
+
+            // ── Trivy SARIF ──
+            const trivyFile = findFile('scan-results', 'trivy-results.sarif');
+            if (trivyFile) {
+              const sarif = readJSON(trivyFile);
+              for (const run of (sarif?.runs || [])) {
+                const ruleMap = {};
+                for (const rd of (run.tool?.driver?.rules || [])) ruleMap[rd.id] = rd;
+                for (const r of (run.results || [])) {
+                  const ruleId = r.ruleId || 'unknown';
+                  const ruleDef = ruleMap[ruleId];
+                  const msg = (r.message?.text || '').split('\n')[0].substring(0, 300);
+                  const cveMatch = ruleId.match(/CVE-\d+-\d+/);
+                  const cveId = cveMatch?.[0] || '';
+                  const fixMatch = msg.match(/Fixed Version:\s*(\S+)/i);
+                  const pkgMatch = msg.match(/Package:\s*(\S+)/i) || msg.match(/^(\S+)/);
+                  const pkg = pkgMatch?.[1] || ruleId;
+                  const fixVer = fixMatch?.[1] || '';
+
+                  findings.push({
+                    source: 'Trivy',
+                    risk: (r.level === 'error') ? 'CRITICAL' : 'HIGH',
+                    location: `\`requirements.txt\` — \`${pkg}\``,
+                    ruleId: cveId || ruleId,
+                    title: `${pkg} — ${cveId || ruleId}`,
+                    description: ruleDef?.fullDescription?.text?.substring(0, 300) || msg,
+                    fix: fixVer
+                      ? `**Upgrade ${pkg}>=${fixVer}:**\n\`\`\`bash\n# Update requirements.in then regenerate\npip-compile --generate-hashes -o requirements.txt requirements.in\n\`\`\``
+                      : `Review the [advisory](https://nvd.nist.gov/vuln/detail/${cveId || ruleId}) for mitigation.`,
+                    links: cveId ? [`[${cveId}](https://nvd.nist.gov/vuln/detail/${cveId})`] : [],
+                  });
+                }
+              }
+            }
+
+            // Deduplicate (same CVE from multiple scanners)
+            const seen = new Set();
+            const deduped = [];
+            for (const f of findings) {
+              const key = f.ruleId;
+              if (!seen.has(key)) { seen.add(key); deduped.push(f); }
+            }
+            deduped.sort((a, b) => (riskOrder[a.risk] ?? 99) - (riskOrder[b.risk] ?? 99));
+
+            // ── Build comment ──
+            const L = [];
+
+            if (failCount === 0) {
+              L.push(`## ✅ Supply Chain Security — All Checks Passed`);
+              L.push(``);
+              L.push(`All **${passCount}** supply chain checks passed.`);
+            } else {
+              L.push(`## 🔗 Supply Chain Security — ${failCount} Check${failCount > 1 ? 's' : ''} Failed`);
+              L.push(``);
+              L.push(`> **This PR cannot be merged** until the supply chain issues below are resolved.`);
+            }
+            L.push(``);
+
+            // Quick-fix commands
+            const depFixes = deduped.filter(f => f.fix?.includes('pip-compile'));
+            if (depFixes.length > 0) {
+              L.push(`### ⚡ Quick Fix`);
+              L.push(``);
+              L.push('```bash');
+              L.push(`# Update requirements.in with fixed versions, then:`);
+              L.push(`pip-compile --generate-hashes -o requirements.txt requirements.in`);
+              L.push('```');
+              L.push(``);
+            }
+
+            // Status table
+            L.push(`### Check Results`);
+            L.push(``);
+            L.push(`| Check | Category | Status | |`);
+            L.push(`|:------|:---------|:------:|:-|`);
+            for (const j of jobs) {
+              let icon, note;
+              if (j.result === 'success') { icon = '✅'; note = ''; }
+              else if (j.result === 'failure') { icon = '❌'; note = `[View logs](${runUrl})`; }
+              else { icon = '⏭️'; note = j.name === 'Dependency Review' ? 'Runs on PRs only' : 'Skipped'; }
+              L.push(`| **${j.name}** | ${j.cat} | ${icon} | ${note} |`);
+            }
+            L.push(``);
+
+            // Findings
+            if (deduped.length > 0) {
+              L.push(`---`);
+              L.push(``);
+              L.push(`### Findings (${deduped.length} total)`);
+              L.push(``);
+
+              const grouped = {};
+              for (const f of deduped) {
+                if (!grouped[f.risk]) grouped[f.risk] = [];
+                grouped[f.risk].push(f);
+              }
+
+              let n = 0;
+              for (const risk of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']) {
+                const items = grouped[risk];
+                if (!items?.length) continue;
+                const open = (risk === 'CRITICAL' || risk === 'HIGH') ? ' open' : '';
+                L.push(`<details${open}>`);
+                L.push(`<summary>${riskIcon[risk]} <strong>${risk}</strong> — ${items.length} finding${items.length > 1 ? 's' : ''}</summary>`);
+                L.push(``);
+
+                for (const f of items) {
+                  n++;
+                  L.push(`#### ${n}. ${f.title}`);
+                  L.push(``);
+                  const refs = f.links?.length ? ' · ' + f.links.join(' · ') : '';
+                  L.push(`> **${f.source}** · ${f.location}${refs}`);
+                  L.push(``);
+                  L.push(`**What:** ${f.description}`);
+                  L.push(``);
+                  L.push(`<details>`);
+                  L.push(`<summary>🔧 How to fix</summary>`);
+                  L.push(``);
+                  L.push(f.fix);
+                  L.push(``);
+                  L.push(`</details>`);
+                  L.push(``);
+                }
+                L.push(`</details>`);
+                L.push(``);
+              }
+            } else if (failCount > 0) {
+              L.push(`> ⚠️ Checks failed but no parseable artifacts found. [View workflow logs](${runUrl}).`);
+            }
+
+            L.push(`---`);
+            L.push(``);
+            L.push(`<details>`);
+            L.push(`<summary>ℹ️ About this check</summary>`);
+            L.push(``);
+            L.push(`This supply chain analysis is auto-generated by the [centralized security pipeline](https://github.com/hawkeyesectest/security-workflows).`);
+            L.push(``);
+            L.push(`**Checks performed:** Lock file integrity · Dependency review · CVE scanning (pip-audit + Trivy + Grype) · License compliance · SBOM generation · SLSA provenance attestation · OpenSSF Scorecard`);
+            L.push(``);
+            L.push(`**False positive?** Document in your repo's \`SECURITY.md\` or add to the suppression config.`);
+            L.push(``);
+            L.push(`</details>`);
+
+            const body = L.join('\n');
+            const marker = '<!-- supply-chain-summary -->';
+            const fullBody = marker + '\n' + body;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user?.login === 'github-actions[bot]' &&
+              (c.body?.includes(marker) || c.body?.includes('Supply Chain Security'))
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body: fullBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body: fullBody,
+              });
+            }
