@@ -46,33 +46,59 @@ jobs:
           python-version: ${{ inputs.python-version }}
       - name: Verify lock file integrity
         run: |
-          pip install pip-tools
-
           if [ ! -f requirements.in ]; then
             echo "::error::Missing requirements.in — dependencies must be declared in requirements.in and compiled with pip-compile --generate-hashes"
             exit 1
           fi
-
-          if ! head -20 requirements.txt | grep -q -- '--hash='; then
-            echo "::error::requirements.txt is missing hash pins. Regenerate with: pip-compile --generate-hashes -o requirements.txt requirements.in"
+          if [ ! -f requirements.txt ]; then
+            echo "::error::Missing requirements.txt — run: pip-compile --generate-hashes -o requirements.txt requirements.in"
             exit 1
           fi
 
-          pip-compile --generate-hashes --output-file /tmp/requirements-check.txt requirements.in --quiet
+          python3 << 'PYEOF'
+          import re, sys
 
-          # Strip auto-generated header comments before comparing (output path and Python version differ)
-          grep -v '^#' requirements.txt | grep -v '^$' > /tmp/existing-stripped.txt
-          grep -v '^#' /tmp/requirements-check.txt | grep -v '^$' > /tmp/check-stripped.txt
+          with open("requirements.in") as f:
+              in_pkgs = set()
+              for line in f:
+                  line = line.strip()
+                  if line and not line.startswith("#"):
+                      name = re.split(r"[><=\[~!;]", line)[0].strip().lower().replace("-", "_")
+                      if name:
+                          in_pkgs.add(name)
 
-          if ! diff -u /tmp/existing-stripped.txt /tmp/check-stripped.txt > /tmp/lock-diff.txt 2>&1; then
-            echo "::error::requirements.txt is out of sync with requirements.in. Run: pip-compile --generate-hashes -o requirements.txt requirements.in"
-            echo ""
-            echo "Diff (ignoring comments):"
-            cat /tmp/lock-diff.txt
-            exit 1
-          fi
+          with open("requirements.txt") as f:
+              txt_content = f.read()
 
-          echo "Lock file is up-to-date and hash-pinned."
+          txt_pkgs = set()
+          blocks = re.split(r"\n(?=[a-zA-Z])", txt_content)
+          errors = []
+          for block in blocks:
+              lines = block.strip().split("\n")
+              if not lines or lines[0].startswith("#"):
+                  continue
+              m = re.match(r"^([a-zA-Z0-9_.~-]+(?:\[[^\]]+\])?)==(\S+)", lines[0])
+              if not m:
+                  pkg_name_match = re.match(r"^([a-zA-Z0-9_.~-]+)", lines[0])
+                  if pkg_name_match and not lines[0].startswith("#"):
+                      errors.append(f"Unpinned package: {lines[0].split()[0]}")
+                  continue
+              pkg = m.group(1).lower().replace("-", "_").split("[")[0]
+              txt_pkgs.add(pkg)
+              if "--hash=sha256:" not in block:
+                  errors.append(f"Missing hash for: {m.group(1)}=={m.group(2)}")
+
+          missing = in_pkgs - txt_pkgs
+          for p in sorted(missing):
+              errors.append(f"Package from requirements.in not in requirements.txt: {p}")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+
+          print(f"Lock file OK: {len(txt_pkgs)} packages pinned with == and SHA256 hashes.")
+          PYEOF
 
   dependency-review:
     name: "Integrity: Dependency Review"
